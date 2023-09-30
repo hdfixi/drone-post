@@ -1,11 +1,10 @@
 #include <Arduino.h>
-
 #include <SPI.h> 
 #include "nRF24L01.h"
 #include "RF24.h" 
 #include <ESP32Servo.h>
 #include "MPU9250.h"
-#include<Wire.h>
+#include <Wire.h>
 
 
 // I2C device found at address 0x68
@@ -43,11 +42,12 @@ float data[5];
 #define SCK 26
 #define MOSI 27
 #define MISO 25
+
+
 /****************LEDS***************/
 #define Bled 4
 #define Gled 15
 #define Rled 2
-
 
 
 /*************Defines_for_motor***********/
@@ -74,17 +74,17 @@ bool calibrate = true;
 
 
 /***************PID coef************/
-double PID_PITCH_kp =2;
-double PID_PITCH_kd =0.3;
-double PID_PITCH_ki =0.002;
+double PID_PITCH_kp =1.8;//2;
+double PID_PITCH_kd =0.02;//0.3;
+double PID_PITCH_ki =0;//0.002;
 
 double PID_ROLL_kp =PID_PITCH_kp;
 double PID_ROLL_kd =PID_PITCH_kd;
 double PID_ROLL_ki =PID_PITCH_ki;
 
-double PID_YAW_kp =3;
-double PID_YAW_kd =0;
-double PID_YAW_ki =0.001;
+double PID_YAW_kp =0;//0.3;
+double PID_YAW_kd =0;//0.02;
+double PID_YAW_ki =0;
 
 float previous_pitch_error = .0;
 float previous_roll_error = .0;
@@ -110,7 +110,7 @@ void sendingtask( void *parameter);
 RF24 receiver(12, 14, 26, 25, 27);
 //RF24 (CE, CSN, SCK, MISO, MOSI); 
 
-const uint64_t p= 0x00011111;//IMPORTANT: The same as in the transmitter
+const uint64_t p= 0x01111111;//IMPORTANT: The same as in the transmitter
 const uint64_t r= 0x00011001;
 int16_t values_received[4];
 
@@ -194,11 +194,83 @@ mpu.calibrateAccelGyro();
  
 
 }
-void loop() {
-  // put your main code here, to run repeatedly:
+void loop(){
+current_time=millis();
+Measured_Roll_Pitch_Yaw(Roll, Pitch, Yaw);
+
+
+if(receiver.available()){
+receiver.read(values_received, sizeof(values_received));
+digitalWrite(Bled,1);
+  digitalWrite(Rled,1);
+delayMicroseconds(4000);
+  #ifdef DEBUG_NRF
+      Serial.print("throtlle:");
+  Serial.print(values_received[0]);
+   Serial.print("   Yaw:");
+    Serial.print(values_received[1]);
+   Serial.print("   Roll:");
+    Serial.print(values_received[2]);
+   Serial.print("   Pitch:");
+    Serial.print(values_received[3]);
+   Serial.println("   ");
+
+   #endif 
+
+   //UpdateMotorsValues(values_received[0],PitchPIDOutput,0,0);
+   #ifdef fixi_motors
+MOTOR_0.writeMicroseconds(values_received[0]);
+MOTOR_1.writeMicroseconds(values_received[0]);
+ MOTOR_2.writeMicroseconds(values_received[0]);
+ MOTOR_3.writeMicroseconds(values_received[0]);
+  #endif
+if(values_received[0]>1050){
+  current_time=micros();
+  float dt=(current_time-last_time)/1000000;
+int16_t RollPIDOutput   = ExecuteRollPID(values_received[2], Roll,dt);
+int16_t PitchPIDOutput  = ExecutePitchPID(values_received[3], Pitch,dt);
+int16_t YawPIDOutput  = ExecuteYawPID(values_received[1], Yaw,dt);
+#ifdef PID
+    Serial.print("RollPIDOutput:");
+  Serial.print(RollPIDOutput);
+   Serial.print("   PitchPIDOutput:");
+    Serial.print(PitchPIDOutput);
+   Serial.print("   YawPIDOutput :");
+    Serial.println(YawPIDOutput );
+#endif
+UpdateMotorsValues(values_received[0],RollPIDOutput,PitchPIDOutput ,YawPIDOutput);
+
+}
+else{
+MOTOR_0.writeMicroseconds(MIN_THROTTLE);
+MOTOR_1.writeMicroseconds(MIN_THROTTLE);
+MOTOR_2.writeMicroseconds(MIN_THROTTLE);
+MOTOR_3.writeMicroseconds(MIN_THROTTLE);
+}
+}
+
+if(!receiver.available()){
+  digitalWrite(Bled,0);
+  digitalWrite(Rled,1);
+  #ifdef DEBUG_NRF
+    Serial.println(" No signal !  ");
+  #endif 
+MOTOR_0.writeMicroseconds(MIN_THROTTLE);
+MOTOR_1.writeMicroseconds(MIN_THROTTLE);
+MOTOR_2.writeMicroseconds(MIN_THROTTLE);
+MOTOR_3.writeMicroseconds(MIN_THROTTLE);
 }
 
 
+
+
+
+
+last_time=current_time;
+//delay(10);
+
+
+}
 
 
 
@@ -393,4 +465,33 @@ void Readytogo(){
   MPU_Angles_Avr(rollAvr, pitchAvr, yawAvr);
   digitalWrite(Gled,0);
   digitalWrite(Bled,0);
+}
+void inline UpdateMotorsValues( const int16_t throttle, const int16_t pitch_pid_output,
+const int16_t roll_pid_output, const int16_t yaw_pid_output) {
+long m2 = throttle + pitch_pid_output + roll_pid_output +yaw_pid_output;
+long m1 = throttle + pitch_pid_output - roll_pid_output - yaw_pid_output;
+long m0 = throttle - pitch_pid_output - roll_pid_output + yaw_pid_output;
+long m3 = throttle - pitch_pid_output + roll_pid_output - yaw_pid_output;
+
+
+
+m0=max((long)MIN_THROTTLE,min((long)MAX_THROTTLE,m0));
+m1=max((long)MIN_THROTTLE,min((long)MAX_THROTTLE,m1));
+m2=max((long)MIN_THROTTLE,min((long)MAX_THROTTLE,m2));
+m3=max((long)MIN_THROTTLE,min((long)MAX_THROTTLE,m3));
+#ifdef DEBUG_MOTORS_SPEED
+Serial.print(" m0 : ");
+Serial.print(m0);
+Serial.print(" m1 : ");
+Serial.print(m1);
+Serial.print(" m2 : ");
+Serial.print(m2);
+Serial.print(" m3 : ");
+Serial.print(m3);
+Serial.print("\n");
+#endif
+ MOTOR_0.writeMicroseconds(m0);
+MOTOR_1.writeMicroseconds(m1);
+ MOTOR_2.writeMicroseconds(m2);
+MOTOR_3.writeMicroseconds(m3);
 }
