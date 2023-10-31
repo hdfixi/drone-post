@@ -5,7 +5,8 @@
 #include <ESP32Servo.h>
 #include "MPU9250.h"
 #include <Wire.h>
-
+#include<iostream>
+#include<string>
 
 // I2C device found at address 0x68
 // I2C device found at address 0x76
@@ -17,7 +18,7 @@
 //#define webtest
 //#define webtestyaw
 //#define bmp_debug
-#define DEBUG_MPU
+//#define DEBUG_MPU
 //#define DEBUG_GPS
 //#define PID
 //#define DEBUG_NRF
@@ -74,17 +75,17 @@ bool calibrate = true;
 
 
 /***************PID coef************/
-double PID_PITCH_kp =1.8;//2;
-double PID_PITCH_kd =0.02;//0.3;
+double PID_PITCH_kp =0.94;//2;
+double PID_PITCH_kd =0.01;//0.3;
 double PID_PITCH_ki =0;//0.002;
 
 double PID_ROLL_kp =PID_PITCH_kp;
 double PID_ROLL_kd =PID_PITCH_kd;
 double PID_ROLL_ki =PID_PITCH_ki;
 
-double PID_YAW_kp =0;//0.3;
+double PID_YAW_kp =1;//0.3;
 double PID_YAW_kd =0;//0.02;
-double PID_YAW_ki =0;
+double PID_YAW_ki =0.001;
 
 float previous_pitch_error = .0;
 float previous_roll_error = .0;
@@ -105,6 +106,8 @@ void Task1code( void *parameter);
 void bmptask( void *parameter);
 void gpstask( void *parameter);
 void sendingtask( void *parameter);
+float  parse_and_handle_message();
+void handle_ble_serial();
 /****************nrf***************/
 //nrf oject win pins
 RF24 receiver(12, 14, 26, 25, 27);
@@ -119,13 +122,22 @@ int16_t values_received[4];
 //time 
 long current_time=0,last_time=0;
 
+//bluetooth
+String message = "";
+int end_message_signal = 10;
+bool message_recieved = false;
+bool poweroff=false;
 
 void setup(void){
-
+//set pins to 0
+MOTOR_0.writeMicroseconds(MIN_THROTTLE);
+MOTOR_1.writeMicroseconds(MIN_THROTTLE);
+MOTOR_2.writeMicroseconds(MIN_THROTTLE);
+MOTOR_3.writeMicroseconds(MIN_THROTTLE);
 
 
 #ifdef DEBUG
-Serial.begin(115200);
+Serial.begin(9600);
 #endif
 //LEDS setting
 pinMode(Bled,OUTPUT);
@@ -179,7 +191,11 @@ Serial.println("Failed to initialize MPU9250.");
 }
 Serial.println(" initialize MPU9250.");
 
-  /* Default settings from datasheet. */
+  /* bluetooth and clear serial */
+  while (Serial.available()) /* If data is available on serial port */
+  { 
+    Serial.read();
+  }
 
 
 #ifdef calib
@@ -197,9 +213,15 @@ mpu.calibrateAccelGyro();
 void loop(){
 current_time=millis();
 Measured_Roll_Pitch_Yaw(Roll, Pitch, Yaw);
+ handle_ble_serial();
+if(poweroff){
+MOTOR_0.writeMicroseconds(MIN_THROTTLE);
+MOTOR_1.writeMicroseconds(MIN_THROTTLE);
+MOTOR_2.writeMicroseconds(MIN_THROTTLE);
+MOTOR_3.writeMicroseconds(MIN_THROTTLE);
+}
 
-
-if(receiver.available()){
+else if(receiver.available()){
 receiver.read(values_received, sizeof(values_received));
 digitalWrite(Bled,1);
   digitalWrite(Rled,1);
@@ -224,7 +246,7 @@ MOTOR_1.writeMicroseconds(values_received[0]);
  MOTOR_2.writeMicroseconds(values_received[0]);
  MOTOR_3.writeMicroseconds(values_received[0]);
   #endif
-if(values_received[0]>1050){
+if(values_received[0]>1080){
   current_time=micros();
   float dt=(current_time-last_time)/1000000;
 int16_t RollPIDOutput   = ExecuteRollPID(values_received[2], Roll,dt);
@@ -320,7 +342,7 @@ long error;
 float integral = .0;
 float proportional;
 float derivative;
-long psp=map(pitch_set_point,1000,2000,-54,66);
+long psp=map(pitch_set_point,1000,2000,-36,46);//46
 psp=max((long)-50,min(psp,(long)50));
 if(psp<=3&&psp>=-3)psp=0;
 error = (psp- measured_pitch);
@@ -364,7 +386,7 @@ long error;
 float integral = .0;
 float proportional;
 float derivative;
-long rsp=map(roll_set_point,1000,2000,-52,68);
+long rsp=map(roll_set_point,1000,2000,-32,46);//48
 rsp=max((long)-50,min(rsp,(long)50));
 if(rsp<=3&&rsp>=-3)rsp=0;
 
@@ -465,13 +487,14 @@ void Readytogo(){
   MPU_Angles_Avr(rollAvr, pitchAvr, yawAvr);
   digitalWrite(Gled,0);
   digitalWrite(Bled,0);
+  Serial.println("ready to go");
 }
 void inline UpdateMotorsValues( const int16_t throttle, const int16_t pitch_pid_output,
 const int16_t roll_pid_output, const int16_t yaw_pid_output) {
-long m2 = throttle + pitch_pid_output + roll_pid_output +yaw_pid_output;
-long m1 = throttle + pitch_pid_output - roll_pid_output - yaw_pid_output;
-long m0 = throttle - pitch_pid_output - roll_pid_output + yaw_pid_output;
-long m3 = throttle - pitch_pid_output + roll_pid_output - yaw_pid_output;
+long m2 = throttle + pitch_pid_output + roll_pid_output - yaw_pid_output;
+long m1 = throttle + pitch_pid_output - roll_pid_output + yaw_pid_output;
+long m0 = throttle - pitch_pid_output - roll_pid_output - yaw_pid_output;
+long m3 = throttle - pitch_pid_output + roll_pid_output + yaw_pid_output;
 
 
 
@@ -494,4 +517,81 @@ Serial.print("\n");
 MOTOR_1.writeMicroseconds(m1);
  MOTOR_2.writeMicroseconds(m2);
 MOTOR_3.writeMicroseconds(m3);
+}
+
+void handle_ble_serial(){
+  while (Serial.available()) /* If data is available on serial port */
+  { 
+    char c = Serial.read();
+    message += c ;
+
+    if (c == end_message_signal){
+      message_recieved = 1;
+      break;
+    }
+  }
+  if (message_recieved){
+    // handle message here !!!
+
+    float x = parse_and_handle_message();
+    if (x){
+    String debug_message = "changing k"+ String(message[0]) + " to "+String(x)+">>\n";
+    Serial.print(debug_message);
+    }
+    else {
+    Serial.print(message + "some error occured \n");
+    }
+    // clear message
+    message_recieved = 0;
+    message = ""; 
+
+  }
+  
+}
+float  parse_and_handle_message(){
+    
+    if (message[0] == 'p' || message[0] == 'd' || message[0] == 'e' || message[0] == 'a'|| message[0] == 'o'   ) {
+      
+      float x = atof(message.substring(1).c_str());
+      char type = message[0];
+      
+      if (type=='p'){
+      
+       PID_YAW_kp=x;
+        Serial.println(PID_YAW_kp,5);//remove me
+      }else if(type=='d'){
+
+        PID_YAW_kd=x;
+        Serial.println(PID_YAW_kd,5);//remove me
+      }
+      else if(type=='e'){
+
+        PID_YAW_ki=x;
+        Serial.println(PID_YAW_ki,5);//remove me
+      }
+      else if (type=='a'){
+        //change Power
+      }else if (type=='o'){
+        //change on/off 
+        // on x==2
+        if(x==1){
+          PID_YAW_kp=1.3;
+          PID_YAW_kd=0;
+          PID_YAW_ki=0;
+        }
+        else if(x==2){
+          poweroff=!poweroff;
+        }
+        else if (x==7){
+          Serial.println(PID_YAW_kp,8);//remove me
+          Serial.println(PID_YAW_kd,8);//remove me
+          Serial.println(PID_YAW_ki,8);//remove m
+        }
+      }
+    return x;
+    }
+    
+  
+  return 0;
+
 }
